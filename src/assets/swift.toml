@@ -1,0 +1,13 @@
+[device]
+name = "SWIFT"
+
+[archive_org]
+access_key = "YOUR_ACCESS_KEY_HERE"
+secret_key = "YOUR_SECRET_KEY_HERE"
+creator = "Your name here"
+subject_tags = ["soundscapes", "Cornell Swift Recorder"]
+collection_id = "media"
+license_url = "https://creativecommons.org/licenses/by/4.0/"
+base_description = """
+Recordings from a Cornell Swift Bioacoustics Recorder."""
+test_item = true

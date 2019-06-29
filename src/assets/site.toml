@@ -1,0 +1,5 @@
+name = "Cartwright Nature Sanctuary"
+subject_tags = ["Cartwright Nature Sanctuary", "Dundas, Ontario"]
+description = """
+Field recordings from Cartwright Nature Sanctuary in Dundas, Ontario, Canada."""
+ready_to_upload = false

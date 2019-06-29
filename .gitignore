@@ -1,5 +1,11 @@
 /target
 **/*.rs.bk
 /dummy*
-servers.toml
+./servers.toml
+./swift.toml
+./ia_manifest.toml
 swift.toml
+ia_manifest.toml
+*.m4a
+*.wav
+*.flac
