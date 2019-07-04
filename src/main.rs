@@ -1,18 +1,12 @@
-extern crate glob;
 extern crate toml;
 extern crate curl;
-use std::fmt;
-use std::fs::{self, DirEntry, File};
+use std::fs::{self, File};
 use std::path::Path;
 use std::io;
 use std::io::Read;
 use std::io::prelude::*;
-use std::env;
 use std::process;
 use std::error::Error;
-use std::collections::HashMap;
-use std::io::BufReader;
-use glob::glob;
 use serde_derive::Deserialize;
 use toml::value::Array;
 use toml::map::Map;
@@ -33,6 +27,7 @@ struct ArchiveOrg {
     collection_id: String,
     license_url: String,
     base_description: String,
+    test_mode: bool
 }
 
 #[derive(Deserialize)]
@@ -56,6 +51,9 @@ struct IAManifest {
     files: toml::value::Array,
 }
 
+const ARCHIVE_ORG_META_PREFIX: &str = "swift-archiver--";
+const SWIFT_ARCHIVER_AGENT_NAME: &str = "Swift Archiver v0.1";
+const SWIFT_ARCHIVER_AGENT_URL: &str = "https://github.com/rgeraldporter/swift_archiver";
 const SWIFT_CONFIG_FILENAME: &str = "swift.toml";
 const SWIFT_DEFAULT_CONFIG: &str = r#"[device]
 name = "SWIFT"
@@ -69,7 +67,7 @@ collection_id = "media"
 license_url = "https://creativecommons.org/licenses/by/4.0/"
 base_description = """
 Recordings from a Cornell Swift Bioacoustics Recorder."""
-test_item = true"#;
+test_mode = true"#;
 
 fn file_to_string(file: File) -> String {
 
@@ -89,15 +87,16 @@ fn read_file(file_path: &str) -> String {
     }
 }
 
-fn prompt_yn(text: &str) -> String {
+fn prompt_query(text: &str) -> String {
 
-    let mut yn = String::new();
+    let mut answer = String::new();
     println!("{}", text);
     io::stdout().flush();
-    io::stdin().read_line(&mut yn).expect("Failed to read line");
+    io::stdin().read_line(&mut answer).expect("Failed to read line");
 
-    yn
+    answer.trim().to_string()
 }
+
 
 // specific to swift file right now, should be made more generic
 fn read_file_or(file_path: &str, default: &str) -> String {
@@ -112,7 +111,7 @@ fn read_file_or(file_path: &str, default: &str) -> String {
         let prompt = format!("No `{}` file was found, do you want one created with placeholder values?", file_path);
 
         loop {
-            match prompt_yn(&prompt).trim() {
+            match prompt_query(&prompt).trim() {
                 "y"|"Y" => break,
                 "n"|"N" => {
                     println!("You will need a `{}` file in the root directory of your recordings to use this tool.", file_path);
@@ -156,6 +155,21 @@ fn save_swift_config_from_string(config: &str) {
     file.write_all(config.as_bytes()).expect("Could not write new swift.toml file!");
 }
 
+fn save_site(s: Site, path: &str) {
+
+    let mut site = toml::map::Map::new();
+    site.insert("name".into(), Value::String(s.name));
+    site.insert("subject_tags".into(), Value::Array(s.subject_tags));
+    site.insert("description".into(), Value::String(s.description));
+    site.insert("ready_to_upload".into(), Value::Boolean(s.ready_to_upload));
+
+    let site = toml::ser::to_string_pretty(&Value::Table(site)).unwrap();
+    let site_path: String = format!("{}/site.toml", path);
+    let mut file = std::fs::File::create(site_path).unwrap();
+
+    file.write_all(site.as_bytes()).expect("Could not write site.toml file!");
+}
+
 fn save_manifest(v: IAManifest) {
 
     let mut manifest = toml::map::Map::new();
@@ -163,10 +177,7 @@ fn save_manifest(v: IAManifest) {
     manifest.insert("update".into(), Value::Boolean(v.update));
     manifest.insert("files".into(), Value::Array(v.files));
 
-    let mut map = toml::map::Map::new();
-    map.insert("manifest".into(), Value::Table(manifest));
-
-    let manifest = toml::ser::to_string_pretty(&Value::Table(map)).unwrap();
+    let manifest = toml::ser::to_string_pretty(&Value::Table(manifest)).unwrap();
 
     let mut file = std::fs::File::create("ia_manifest.toml").unwrap();
     file.write_all(manifest.as_bytes()).expect("Could not write manifest to file!");
@@ -188,17 +199,74 @@ fn directory_list(file_path: &str) -> Result<Vec<std::path::PathBuf>, Box<Error>
     Ok(dirs)
 }
 
-fn upload_file(bucket: &str, file_path: &str, config: Config) {
+fn file_list(file_path: &str) -> Result<Vec<std::path::PathBuf>, Box<Error>> {
+
+    let mut files: Vec<std::path::PathBuf> = Vec::new();
+
+    for entry in fs::read_dir(file_path)? {
+        let entry = entry?;
+        let path = entry.path();
+
+        if path.is_file() {
+            files.push(path);
+        }
+    }
+
+    Ok(files)
+}
+
+// for standard IA meta headers
+fn ia_meta_header(key: &str, value: &str) -> String {
+    let ia_header_prefix: &str = "x-archive-meta-";
+    [ia_header_prefix, key, ":", value].join("")
+}
+
+// for custom meta headers
+fn ia_swift_meta_header(key: &str, value: &str) -> String {
+    let ia_header_prefix: &str = "x-archive-meta-";
+    [ia_header_prefix, ARCHIVE_ORG_META_PREFIX, key, ":", value].join("")
+}
+
+fn upload_file(bucket: &str, file_path: &str, config: &Config, site: &Site, date: &str) {
 
     let mut file = File::open(file_path).unwrap();
     let ia_url = format!("https://s3.us.archive.org/{}/{}", bucket, file_path);
     let mut headers = List::new();
     let auth_header = format!("authorization:LOW {}:{}", config.archive_org.access_key, config.archive_org.secret_key);
+    // @todo covert date from YYYY-MM-DD to YYYY.MM.DD
+    let date_for_title = str::replace(&date, "-", ".");
+    let title = format!("{} {} {}", &config.device.name, date_for_title, &site.name);
+    let mut subject_tags_text = String::new();
+    let collection = match &config.archive_org.test_mode {
+        true => "test_collection",
+        false => &config.archive_org.collection_id
+    };
+
+    //println!("collection: {}", collection);
+
+    for tag in &site.subject_tags {
+        subject_tags_text.push_str(tag.as_str().unwrap());
+        subject_tags_text.push_str(";");
+    }
 
     headers.append(&auth_header).unwrap();
     headers.append("x-amz-auto-make-bucket:1").unwrap();
+    // @todo verify this works and hook up collection
     headers.append("x-archive-meta01-collection:test_collection").unwrap();
-    headers.append("x-archive-meta-mediatype:audio").unwrap();
+    headers.append(&ia_meta_header("creator", &config.archive_org.creator)).unwrap();
+    headers.append(&ia_meta_header("date", &date)).unwrap();
+    headers.append(&ia_meta_header("licenseurl", &config.archive_org.license_url)).unwrap();
+    headers.append(&ia_meta_header("subject", &subject_tags_text)).unwrap();
+    headers.append(&ia_meta_header("mediatype", "audio")).unwrap();
+    headers.append(&ia_meta_header("title", &title)).unwrap();
+    headers.append(&ia_meta_header("description", &site.description)).unwrap();
+    headers.append(&ia_meta_header("scanner", SWIFT_ARCHIVER_AGENT_NAME)).unwrap();
+    headers.append(&ia_swift_meta_header("url", SWIFT_ARCHIVER_AGENT_URL)).unwrap();
+    headers.append(&ia_swift_meta_header("deviceprefix", &config.device.name)).unwrap();
+    headers.append(&ia_swift_meta_header("location", &site.name)).unwrap();
+    headers.append(&ia_swift_meta_header("gps", "GPS COORDS TO GO HERE")).unwrap();
+
+    //println!("{:#?}", headers);
 
     let mut handle = Easy::new();
 
@@ -223,6 +291,97 @@ fn upload_file(bucket: &str, file_path: &str, config: Config) {
     transfer.perform().unwrap()
 }
 
+fn strip_characters(original : &str, to_strip : &str) -> String {
+    original.chars().filter(|&c| !to_strip.contains(c)).collect()
+}
+
+fn determine_date(folder_path: &str) -> &str {
+    folder_path.split('_').nth(1).unwrap_or("")
+}
+
+fn determine_identifier(folder_path: &str, device_name: &str) -> String {
+
+    let date_portion = folder_path.split('_').nth(1).unwrap_or("");
+    let date_identifier: String = strip_characters(date_portion, "-");
+
+    let mut identifier = String::new();
+    identifier.push_str(device_name);
+    identifier.push_str(&date_identifier);
+    identifier
+}
+
+fn site_questionnaire(path: &str) -> Site {
+    let site_name = prompt_query("What is the name of the site location?");
+    let subject_tags_response = prompt_query("What subject tags should the archives contain? Separate them by semicolon, e.g. 'soundscape; Hamilton, Ontario; wetland'.");
+    let description = prompt_query("What description would you like to give these archives?");
+    let mut split = subject_tags_response.split(";");
+    let mut subject_tags = toml::value::Array::new();
+
+    for s in split {
+        subject_tags.insert(0, toml::Value::String(s.trim().to_string()));
+    }
+
+    let mut site = Site {
+        name: site_name,
+        subject_tags: subject_tags,
+        description: description,
+        ready_to_upload: true,
+    };
+
+    save_site(site, &path);
+    let site_path: String = format!("{}/site.toml", path);
+    load_site(site_path.as_str())
+}
+
+fn upload_collection(path: &str, config: Config) {
+
+    // check for site data, if not present, prompt for data
+    let site_path: String = format!("{}/site.toml", &path);
+    let site: Site = match Path::new(&site_path).exists() {
+        true => load_site(&site_path),
+        false => site_questionnaire(&path)
+    };
+
+    for dir in directory_list(path).unwrap() {
+
+        let date = determine_date(dir.to_str().unwrap());
+        let identifier = determine_identifier(dir.to_str().unwrap(), &config.device.name);
+        let dir_path = format!("{}", dir.to_str().unwrap());
+
+        println!("Uploading: Identifier {}, from folder {}", &identifier, &dir_path);
+
+        // @todo load manifest if exists; if not exists make one;
+        // do by checking if manifest file exists first
+        //let ia_manifest: IAManifest = load_manifest("src/assets/ia_manifest.toml");
+
+        for file in file_list(&dir_path).unwrap() {
+            // if file already in manifest, skip
+
+            println!("At file: {}", file.to_str().unwrap());
+            let file_path = format!("{}", file.to_str().unwrap());
+            println!("Uploading file: {}", file.to_str().unwrap());
+            // @todo ignore dotfiles e.g. .DS_Store
+            // @todo detect upload failure
+            upload_file(&identifier, &file_path, &config, &site, &date);
+
+            // save manifest
+
+            // push this file into array
+            //let mut filenames = toml::value::Array::new();
+
+            // probably should remove "update"
+            // may be a good idea to add link to archive.org page with this item
+            /*let manifest = IAManifest {
+                identifier: String::from(identifier),
+                update: true,
+                files:
+            }*/
+        };
+
+        println!("Now available at https://archive.org/details/{}", &identifier);
+    }
+}
+
 fn main() {
 
     // commands
@@ -234,59 +393,19 @@ fn main() {
     // 1. read a config file
     let config: Config = load_swift_config(SWIFT_CONFIG_FILENAME);
 
-    // 2. check each first-level directory for site.toml; add them into any that are missing
-    let site_configs = glob("./*/site.toml").expect("Failed to read glob pattern");
-
-    for dir in directory_list("./").unwrap() {
-        let site_path: String = format!("{}/site.toml", dir.to_str().unwrap());
-        let site_config = Path::new(&site_path).exists();
-
-        if site_config {
-            println!("found site config in: {}", site_path);
-        } else {
-            println!("MISSING: {}", site_path);
-            // @todo add the file, or prompt to add the file?
-        }
-    }
-/*
-    for file in site_configs {
-        let file = file.unwrap();
-        let file = file.display();
-
-        let site: Site = load_site(&file.to_string());
-
-        println!("{:?}", file);
-    }
-*/
-
-    // 3. check each second-level directory for an ia_manifest.toml
-    let manifest_configs =  glob("./*/*/ia_manifest.toml").expect("Failed to read glob pattern");
-
-    for file in manifest_configs {
-        let file = file.unwrap();
-        let file = file.display();
-
-        load_manifest(&file.to_string());
-    }
+    // @todo, if no config file, create one!
 
     // 4. if no ia_manifest.toml, create one
     // 5. only upload one dir (day) at a time (for now), one file at a time
     // 6. log each file when completed to `files`, skip uploading files already listed there (this way can be resumed)
-    // 7. set `update` to false when complete
+    // 7. set `update` to false when complete ?
 
-    let mut wav_files = toml::value::Array::new();
-    wav_files.insert(0, Value::String("HNCSW2_20190615_004000.wav".to_string()));
-
-    let ia_manifest = IAManifest {
-        identifier: "HNCSW220190615".to_string(),
-        update: false,
-        files: wav_files,
-    };
-
-    save_manifest(ia_manifest);
+    // upload_all_collections();
+    //  forEach dir... (001, 002, etc)
+    upload_collection("./001", config);
 
     // example usage
-    //upload_file("HNC-RUST-TEST", "./Waterloo10.m4a", config);
+    //upload_file("HNC-RUST-TEST3", "./Waterloo10.m4a", config);
 }
 
 #[cfg(test)]
@@ -322,5 +441,14 @@ mod tests {
         let ia_manifest: IAManifest = load_manifest("src/assets/ia_manifest.toml");
 
         assert_eq!(ia_manifest.identifier, "HNCSW220190615");
+    }
+
+    #[test]
+    fn it_can_create_identifier() {
+        let device_name = "SWX";
+        let folder_name = "SWX_2019-01-16";
+        let identifier = determine_identifier(folder_name, device_name);
+
+        assert_eq!(identifier, "SWX20190116");
     }
 }
