@@ -5,6 +5,7 @@ use colored::Colorize;
 use std::fs::{self, File};
 use std::path::Path;
 use std::io;
+use std::env;
 use std::io::Read;
 use std::io::prelude::*;
 use std::process;
@@ -55,7 +56,7 @@ struct IAManifest {
 }
 
 const ARCHIVE_ORG_META_PREFIX: &str = "swift-archiver--";
-const SWIFT_ARCHIVER_AGENT_NAME: &str = "Swift Archiver v0.1";
+const SWIFT_ARCHIVER_AGENT_NAME: &str = "Swift Archiver v0.1.1";
 const SWIFT_ARCHIVER_AGENT_URL: &str = "https://github.com/rgeraldporter/swift_archiver";
 const SWIFT_CONFIG_FILENAME: &str = "swift.toml";
 const SWIFT_DEFAULT_CONFIG: &str = r#"[device]
@@ -426,32 +427,39 @@ fn upload_collection(path: &str, config: Config) {
     }
 }
 
+fn cmd_upload(args: &Vec<String>) {
+
+    let config: Config = load_swift_config(SWIFT_CONFIG_FILENAME);
+    let folder = &args[2];
+
+    upload_collection(&folder, config);
+}
+
+fn cmd_help() {
+    println!("`help` not fully implemented yet.");
+    println!("`swarc upload [dir_path]`: Start upload of specified directory path.");
+}
+
 fn main() {
 
     // commands
-    // swift upload - upload any that have not completed yet
-    // swift prepare - prepare directories for upload (site.toml)
-    // swift status - notify which dirs are unprepared (not ready_to_upload or missing files)
-    // swift test - verify API key and connection is good by uploading a test item
+    // swarc upload [dir] - upload any that have not completed yet
+    // swarc prepare - prepare directories for upload (site.toml)
+    // swarc status - notify which dirs are unprepared (not ready_to_upload or missing files)
+    // swarc test - verify API key and connection is good by uploading a test item
 
-    // 1. read a config file
-    let config: Config = load_swift_config(SWIFT_CONFIG_FILENAME);
+    let args: Vec<String> = env::args().collect();
+    let command = &args[1];
+
+    match command.as_str() {
+        "upload" => cmd_upload(&args),
+        _ => cmd_help()
+    }
 
     // @todo, if no config file, create one!
-
-    // 4. if no ia_manifest.toml, create one
-    // 5. only upload one dir (day) at a time (for now), one file at a time
-    // 6. log each file when completed to `files`, skip uploading files already listed there (this way can be resumed)
-    // 7. set `update` to false when complete ?
-
     // @todo test API_KEY and secret to ensure it's valid
-
-    // upload_all_collections();
-    //  forEach dir... (001, 002, etc)
-    upload_collection("./07", config);
-
-    // example usage
-    //upload_file("HNC-RUST-TEST3", "./Waterloo10.m4a", config);
+    // @todo handle case where identifier would be identical to existing (moved same date)
+    // perhaps do that by checking first file name; if not 000000, append time after dash
 }
 
 #[cfg(test)]
