@@ -101,6 +101,14 @@ fn prompt_query(text: &str) -> String {
     answer.trim().to_string()
 }
 
+/*
+To fix: if archive.org is down....
+Upload complete in 183 seconds.
+Uploading file: ./010/YYYYY/YYYYY_20190707_180153.wav
+thread 'main' panicked at 'called `Result::unwrap()` on an `Err` value: Error { description: "Failure when receiving data from the peer", code: 56, extra: None }', src/libcore/result.rs:997:5
+note: Run with `RUST_BACKTRACE=1` environment variable to display a backtrace.
+*/
+
 
 // specific to swift file right now, should be made more generic
 fn read_file_or(file_path: &str, default: &str) -> String {
